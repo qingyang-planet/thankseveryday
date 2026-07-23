@@ -1,5 +1,21 @@
 export const ALLOWED_USERNAMES = ['清扬', '颖', '刚'] as const
 
+const USERNAME_ACCOUNT_MAP: Record<(typeof ALLOWED_USERNAMES)[number], string> = {
+  清扬: 'qingyang@praise.app',
+  颖: 'ying@praise.app',
+  刚: 'gang@praise.app',
+}
+
+export function usernameToEmail(username: string): string {
+  return USERNAME_ACCOUNT_MAP[username as (typeof ALLOWED_USERNAMES)[number]] ?? `${username}@praise.app`
+}
+
+export function emailToUsername(email: string | undefined): string | null {
+  if (!email) return null
+  const entry = Object.entries(USERNAME_ACCOUNT_MAP).find(([, account]) => account === email)
+  return entry?.[0] ?? null
+}
+
 export const DAILY_PRAISE_TARGET = 3
 
 export const DAILY_QUOTES = [
@@ -35,10 +51,6 @@ export const DAILY_QUOTES = [
   '生活的美好，常常藏在平凡的日常里。',
   '你并不孤单，我们都在这里陪着你。',
 ]
-
-export function usernameToEmail(username: string): string {
-  return `${encodeURIComponent(username)}@praise.app`
-}
 
 export function formatDateKey(date: Date): string {
   const y = date.getFullYear()

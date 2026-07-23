@@ -2,6 +2,7 @@ import {
   ALLOWED_USERNAMES,
   getDateKeyFromTimestamp,
   getTodayKey,
+  emailToUsername,
   usernameToEmail,
 } from './constants'
 import { getAuth, getDb, isCloudBaseEnabled } from './cloudbase'
@@ -44,6 +45,7 @@ async function resolveCurrentUser(): Promise<User | null> {
   const username =
     profile.username ??
     profile.name ??
+    emailToUsername(profile.email) ??
     decodeURIComponent(profile.email?.split('@')[0] ?? '用户')
 
   return uid ? { uid, username } : null
