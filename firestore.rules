@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidPost() {
+      return request.resource.data.keys().hasAll(['content', 'username', 'userId', 'createdAt', 'likes', 'dislikes'])
+        && request.resource.data.content is string
+        && request.resource.data.content.size() > 0
+        && request.resource.data.content.size() <= 500
+        && request.resource.data.userId == request.auth.uid;
+    }
+
+    match /praises/{postId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidPost();
+      allow update: if isSignedIn()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes', 'dislikes']);
+      allow delete: if false;
+    }
+
+    match /chats/{postId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidPost();
+      allow update: if isSignedIn()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes', 'dislikes']);
+      allow delete: if false;
+    }
+
+    function isValidGratitude() {
+      return request.resource.data.keys().hasAll(['dateKey', 'userId', 'username', 'items', 'updatedAt'])
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.items is list
+        && request.resource.data.items.size() >= 1
+        && request.resource.data.items.size() <= 3;
+    }
+
+    match /gratitudes/{entryId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidGratitude();
+      allow delete: if false;
+    }
+  }
+}
