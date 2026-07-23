@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { loginOrRegister } from '../services'
-import { isFirebaseEnabled } from '../firebase'
+import { isCloudBaseEnabled } from '../cloudbase'
 
 interface LoginProps {
   onSuccess: () => void
@@ -33,7 +33,7 @@ export function Login({ onSuccess }: LoginProps) {
           <span className="emoji">🌻</span>
           <h1>每日夸夸</h1>
           <p>用爱温暖每一天，重拾信心与力量</p>
-          {!isFirebaseEnabled() && (
+          {!isCloudBaseEnabled() && (
             <span className="demo-badge">演示模式 · 数据保存在本机</span>
           )}
         </div>

@@ -1,0 +1,27 @@
+#!/bin/bash
+# 腾讯云 CloudBase 配置指南
+set -e
+cd "$(dirname "$0")/.."
+
+echo "==> 腾讯云 CloudBase 配置步骤"
+echo ""
+echo "1. 打开 https://console.cloud.tencent.com/tcb 创建免费体验环境"
+echo "2. 启用「身份认证」→ 登录方式 → 开启「邮箱密码登录」"
+echo "3. 创建云数据库集合：praises、gratitudes（chats 可选）"
+echo "4. 数据库 → 权限设置 → 所有用户可读，仅创建者可写（或自定义规则，仅登录用户可读写）"
+echo "5. 环境 → 安全配置 → 添加 Web 安全域名："
+echo "   - localhost:5173"
+echo "   - thankseveryday.vercel.app"
+echo "   - 你的 CloudBase 静态托管域名"
+echo ""
+echo "6. 复制环境 ID 到 .env："
+echo "   VITE_CLOUDBASE_ENV_ID=你的环境ID"
+echo "   VITE_DEMO_MODE=false"
+echo ""
+echo "7. 部署前端（任选其一）："
+echo "   A. CloudBase 静态托管（国内访问更快）："
+echo "      npm run build"
+echo "      npx @cloudbase/cli hosting deploy dist -e 你的环境ID"
+echo "   B. Vercel：配置相同环境变量后重新部署"
+echo ""
+echo "完成！"

@@ -1,31 +1,10 @@
 import {
-  createUserWithEmailAndPassword,
-  onAuthStateChanged,
-  signInWithEmailAndPassword,
-  signOut,
-  updateProfile,
-} from 'firebase/auth'
-import {
-  addDoc,
-  collection,
-  doc,
-  getDocs,
-  onSnapshot,
-  orderBy,
-  query,
-  serverTimestamp,
-  setDoc,
-  updateDoc,
-  where,
-  type Timestamp,
-} from 'firebase/firestore'
-import {
   ALLOWED_USERNAMES,
   getDateKeyFromTimestamp,
   getTodayKey,
   usernameToEmail,
 } from './constants'
-import { auth, db, isFirebaseEnabled } from './firebase'
+import { getAuth, getDb, isCloudBaseEnabled } from './cloudbase'
 import {
   demoAddPost,
   demoGetAllGratitudes,
@@ -42,6 +21,27 @@ import {
 } from './demoStore'
 import type { GratitudeEntry, Post, User } from './types'
 
+type CloudBaseDoc = Record<string, unknown> & { _id?: string }
+
+function getAuthErrorMessage(error: { message?: string } | null | undefined, fallback: string) {
+  return error?.message ?? fallback
+}
+
+async function resolveCurrentUser(): Promise<User | null> {
+  const auth = getAuth()
+  const loginState = await auth.getLoginState()
+  if (!loginState?.user) return null
+
+  const profile = loginState.user
+  const uid = profile.uid ?? ''
+  const username =
+    profile.username ??
+    profile.name ??
+    decodeURIComponent(profile.email?.split('@')[0] ?? '用户')
+
+  return uid ? { uid, username } : null
+}
+
 export async function loginOrRegister(username: string, password: string): Promise<User> {
   if (!ALLOWED_USERNAMES.includes(username as (typeof ALLOWED_USERNAMES)[number])) {
     throw new Error('该用户名暂未开放，请联系家人获取账号')
@@ -51,60 +51,71 @@ export async function loginOrRegister(username: string, password: string): Promi
     throw new Error('密码至少需要 4 个字符')
   }
 
-  if (!isFirebaseEnabled()) {
+  if (!isCloudBaseEnabled()) {
     return demoLogin(username, password)
   }
 
+  const auth = getAuth()
   const email = usernameToEmail(username)
 
-  try {
-    const credential = await signInWithEmailAndPassword(auth!, email, password)
-    return { uid: credential.user.uid, username }
-  } catch (error: unknown) {
-    const code = (error as { code?: string }).code
-    if (code === 'auth/user-not-found' || code === 'auth/invalid-credential') {
-      const credential = await createUserWithEmailAndPassword(auth!, email, password)
-      await updateProfile(credential.user, { displayName: username })
-      return { uid: credential.user.uid, username }
+  let signInRes = await auth.signInWithPassword({ email, password })
+  if (signInRes.error) {
+    const signUpRes = await auth.signUp({ email, password, username })
+    if (signUpRes.error) {
+      throw new Error(getAuthErrorMessage(signUpRes.error, '注册失败，请稍后再试'))
     }
-    if (code === 'auth/wrong-password') {
-      throw new Error('密码不正确，请再试一次')
+
+    signInRes = await auth.signInWithPassword({ email, password })
+    if (signInRes.error) {
+      throw new Error(getAuthErrorMessage(signInRes.error, '登录失败，请稍后再试'))
     }
+  }
+
+  const user = await resolveCurrentUser()
+  if (!user) {
     throw new Error('登录失败，请稍后再试')
   }
+
+  return { uid: user.uid, username }
 }
 
 export async function logout(): Promise<void> {
-  if (!isFirebaseEnabled()) {
+  if (!isCloudBaseEnabled()) {
     return demoLogout()
   }
-  await signOut(auth!)
+  await getAuth().signOut()
 }
 
 export function subscribeAuth(callback: (user: User | null) => void): () => void {
-  if (!isFirebaseEnabled()) {
+  if (!isCloudBaseEnabled()) {
     callback(demoGetSession())
     return subscribeDemoStore(() => callback(demoGetSession()))
   }
 
-  return onAuthStateChanged(auth!, (firebaseUser) => {
-    if (!firebaseUser) {
-      callback(null)
-      return
-    }
-    const username =
-      firebaseUser.displayName ||
-      decodeURIComponent(firebaseUser.email?.split('@')[0] ?? '用户')
-    callback({ uid: firebaseUser.uid, username })
+  const auth = getAuth()
+
+  const emit = () => {
+    void resolveCurrentUser().then(callback)
+  }
+
+  emit()
+  const subscription = auth.onAuthStateChange(() => {
+    emit()
   })
+
+  return () => {
+    subscription.data?.subscription?.unsubscribe?.()
+  }
 }
 
 function mapPost(id: string, data: Record<string, unknown>): Post {
-  const createdAtField = data.createdAt as Timestamp | number | undefined
+  const createdAtField = data.createdAt
   const createdAt =
     typeof createdAtField === 'number'
       ? createdAtField
-      : createdAtField?.toMillis?.() ?? Date.now()
+      : createdAtField instanceof Date
+        ? createdAtField.getTime()
+        : Date.now()
 
   return {
     id,
@@ -117,11 +128,15 @@ function mapPost(id: string, data: Record<string, unknown>): Post {
   }
 }
 
+function mapDocsToPosts(docs: CloudBaseDoc[]): Post[] {
+  return docs.map((doc) => mapPost(String(doc._id ?? ''), doc))
+}
+
 export function subscribePosts(
   collectionName: 'praises' | 'chats',
   callback: (posts: Post[]) => void,
 ): () => void {
-  if (!isFirebaseEnabled()) {
+  if (!isCloudBaseEnabled()) {
     const load = async () => callback(await demoGetPosts(collectionName))
     load()
     return subscribeDemoStore(() => {
@@ -129,11 +144,26 @@ export function subscribePosts(
     })
   }
 
-  const q = query(collection(db!, collectionName), orderBy('createdAt', 'desc'))
-  return onSnapshot(q, (snapshot) => {
-    const posts = snapshot.docs.map((docSnap) => mapPost(docSnap.id, docSnap.data()))
-    callback(posts)
-  })
+  const db = getDb()
+  const listener = db
+    .collection(collectionName)
+    .orderBy('createdAt', 'desc')
+    .watch({
+      onChange: (snapshot) => {
+        callback(mapDocsToPosts(snapshot.docs as CloudBaseDoc[]))
+      },
+      onError: () => {
+        void db
+          .collection(collectionName)
+          .orderBy('createdAt', 'desc')
+          .get()
+          .then((res) => {
+            callback(mapDocsToPosts((res.data ?? []) as CloudBaseDoc[]))
+          })
+      },
+    })
+
+  return () => listener.close()
 }
 
 export async function addPost(
@@ -144,16 +174,16 @@ export async function addPost(
   const trimmed = content.trim()
   if (!trimmed) throw new Error('内容不能为空')
 
-  if (!isFirebaseEnabled()) {
+  if (!isCloudBaseEnabled()) {
     await demoAddPost(collectionName, user, trimmed)
     return
   }
 
-  await addDoc(collection(db!, collectionName), {
+  await getDb().collection(collectionName).add({
     content: trimmed,
     username: user.username,
     userId: user.uid,
-    createdAt: serverTimestamp(),
+    createdAt: Date.now(),
     likes: [],
     dislikes: [],
   })
@@ -165,7 +195,7 @@ export async function toggleReaction(
   user: User,
   type: 'like' | 'dislike',
 ): Promise<void> {
-  if (!isFirebaseEnabled()) {
+  if (!isCloudBaseEnabled()) {
     await demoToggleReaction(collectionName, post.id, user.uid, type)
     return
   }
@@ -179,7 +209,7 @@ export async function toggleReaction(
     ? post[mine].filter((id) => id !== user.uid)
     : [...post[mine], user.uid]
 
-  await updateDoc(doc(db!, collectionName, post.id), {
+  await getDb().collection(collectionName).doc(post.id).update({
     [other]: nextOther,
     [mine]: nextMine,
   })
@@ -188,7 +218,7 @@ export async function toggleReaction(
 export function subscribeTodayPraiseCounts(
   callback: (counts: Record<string, number>) => void,
 ): () => void {
-  if (!isFirebaseEnabled()) {
+  if (!isCloudBaseEnabled()) {
     const load = async () => callback(await demoGetTodayPraiseCounts())
     load()
     return subscribeDemoStore(() => {
@@ -197,47 +227,45 @@ export function subscribeTodayPraiseCounts(
   }
 
   const today = getTodayKey()
-  const start = new Date(`${today}T00:00:00`)
-  const end = new Date(`${today}T23:59:59.999`)
+  const db = getDb()
 
-  const q = query(
-    collection(db!, 'praises'),
-    where('createdAt', '>=', start),
-    where('createdAt', '<=', end),
-  )
-
-  return onSnapshot(q, (snapshot) => {
+  const computeCounts = (docs: CloudBaseDoc[]) => {
     const counts: Record<string, number> = {}
-    snapshot.docs.forEach((docSnap) => {
-      const data = docSnap.data()
-      const username = String(data.username ?? '')
-      counts[username] = (counts[username] ?? 0) + 1
-    })
-    callback(counts)
-  }, async () => {
-    const snapshot = await getDocs(query(collection(db!, 'praises'), orderBy('createdAt', 'desc')))
-    const counts: Record<string, number> = {}
-    snapshot.docs.forEach((docSnap) => {
-      const data = docSnap.data()
-      const createdAtField = data.createdAt as Timestamp | undefined
-      const createdAt = createdAtField?.toMillis?.() ?? 0
-      const date = new Date(createdAt)
-      const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-      if (key === today) {
-        const username = String(data.username ?? '')
+    docs.forEach((doc) => {
+      const createdAt = typeof doc.createdAt === 'number' ? doc.createdAt : 0
+      if (getDateKeyFromTimestamp(createdAt) === today) {
+        const username = String(doc.username ?? '')
         counts[username] = (counts[username] ?? 0) + 1
       }
     })
     callback(counts)
-  })
+  }
+
+  const listener = db
+    .collection('praises')
+    .orderBy('createdAt', 'desc')
+    .watch({
+      onChange: (snapshot) => computeCounts(snapshot.docs as CloudBaseDoc[]),
+      onError: () => {
+        void db
+          .collection('praises')
+          .orderBy('createdAt', 'desc')
+          .get()
+          .then((res) => computeCounts((res.data ?? []) as CloudBaseDoc[]))
+      },
+    })
+
+  return () => listener.close()
 }
 
 function mapGratitude(id: string, data: Record<string, unknown>): GratitudeEntry {
-  const updatedAtField = data.updatedAt as Timestamp | number | undefined
+  const updatedAtField = data.updatedAt
   const updatedAt =
     typeof updatedAtField === 'number'
       ? updatedAtField
-      : updatedAtField?.toMillis?.() ?? Date.now()
+      : updatedAtField instanceof Date
+        ? updatedAtField.getTime()
+        : Date.now()
 
   return {
     id,
@@ -250,7 +278,7 @@ function mapGratitude(id: string, data: Record<string, unknown>): GratitudeEntry
 }
 
 export function subscribeGratitudes(callback: (entries: GratitudeEntry[]) => void): () => void {
-  if (!isFirebaseEnabled()) {
+  if (!isCloudBaseEnabled()) {
     const load = async () => callback(await demoGetAllGratitudes())
     load()
     return subscribeDemoStore(() => {
@@ -258,17 +286,41 @@ export function subscribeGratitudes(callback: (entries: GratitudeEntry[]) => voi
     })
   }
 
-  const q = query(collection(db!, 'gratitudes'), orderBy('updatedAt', 'desc'))
-  return onSnapshot(q, (snapshot) => {
-    callback(snapshot.docs.map((docSnap) => mapGratitude(docSnap.id, docSnap.data())))
-  })
+  const db = getDb()
+  const listener = db
+    .collection('gratitudes')
+    .orderBy('updatedAt', 'desc')
+    .watch({
+      onChange: (snapshot) => {
+        callback(
+          (snapshot.docs as CloudBaseDoc[]).map((doc) =>
+            mapGratitude(String(doc._id ?? ''), doc),
+          ),
+        )
+      },
+      onError: () => {
+        void db
+          .collection('gratitudes')
+          .orderBy('updatedAt', 'desc')
+          .get()
+          .then((res) => {
+            callback(
+              ((res.data ?? []) as CloudBaseDoc[]).map((doc) =>
+                mapGratitude(String(doc._id ?? ''), doc),
+              ),
+            )
+          })
+      },
+    })
+
+  return () => listener.close()
 }
 
 export function subscribeTodayGratitude(
   user: User,
   callback: (entry: GratitudeEntry | null) => void,
 ): () => void {
-  if (!isFirebaseEnabled()) {
+  if (!isCloudBaseEnabled()) {
     const load = async () => callback(await demoGetTodayGratitude(user))
     load()
     return subscribeDemoStore(() => {
@@ -278,9 +330,26 @@ export function subscribeTodayGratitude(
 
   const todayKey = getTodayKey()
   const docId = `${todayKey}_${user.uid}`
-  return onSnapshot(doc(db!, 'gratitudes', docId), (docSnap) => {
-    callback(docSnap.exists() ? mapGratitude(docSnap.id, docSnap.data()) : null)
+  const db = getDb()
+
+  const listener = db.collection('gratitudes').doc(docId).watch({
+    onChange: (snapshot) => {
+      const doc = snapshot.docs[0] as CloudBaseDoc | undefined
+      callback(doc ? mapGratitude(String(doc._id ?? docId), doc) : null)
+    },
+    onError: () => {
+      void db
+        .collection('gratitudes')
+        .doc(docId)
+        .get()
+        .then((res) => {
+          const doc = (res.data?.[0] ?? null) as CloudBaseDoc | null
+          callback(doc ? mapGratitude(String(doc._id ?? docId), doc) : null)
+        })
+    },
   })
+
+  return () => listener.close()
 }
 
 export async function saveGratitude(user: User, items: string[]): Promise<void> {
@@ -288,19 +357,19 @@ export async function saveGratitude(user: User, items: string[]): Promise<void> 
   if (trimmed.length === 0) throw new Error('请至少写下一件值得感谢的事')
   if (trimmed.length > 3) throw new Error('最多填写 3 件')
 
-  if (!isFirebaseEnabled()) {
+  if (!isCloudBaseEnabled()) {
     await demoSaveGratitude(user, trimmed)
     return
   }
 
   const todayKey = getTodayKey()
   const docId = `${todayKey}_${user.uid}`
-  await setDoc(doc(db!, 'gratitudes', docId), {
+  await getDb().collection('gratitudes').doc(docId).set({
     dateKey: todayKey,
     userId: user.uid,
     username: user.username,
     items: trimmed,
-    updatedAt: serverTimestamp(),
+    updatedAt: Date.now(),
   })
 }
 
@@ -308,7 +377,7 @@ export async function getHistoryByDate(
   dateKey: string,
   praisePosts: Post[],
 ): Promise<{ praises: Post[]; gratitudes: GratitudeEntry[] }> {
-  if (!isFirebaseEnabled()) {
+  if (!isCloudBaseEnabled()) {
     return demoGetHistoryByDate(dateKey)
   }
 
@@ -316,10 +385,9 @@ export async function getHistoryByDate(
     .filter((post) => getDateKeyFromTimestamp(post.createdAt) === dateKey)
     .sort((a, b) => a.createdAt - b.createdAt)
 
-  const q = query(collection(db!, 'gratitudes'), where('dateKey', '==', dateKey))
-  const snapshot = await getDocs(q)
-  const gratitudes = snapshot.docs
-    .map((docSnap) => mapGratitude(docSnap.id, docSnap.data()))
+  const res = await getDb().collection('gratitudes').where({ dateKey }).get()
+  const gratitudes = ((res.data ?? []) as CloudBaseDoc[])
+    .map((doc) => mapGratitude(String(doc._id ?? ''), doc))
     .sort((a, b) => a.updatedAt - b.updatedAt)
 
   return { praises, gratitudes }
