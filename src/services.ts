@@ -2,7 +2,6 @@ import {
   ALLOWED_USERNAMES,
   getDateKeyFromTimestamp,
   getTodayKey,
-  usernameToEmail,
 } from './constants'
 import { getAuth, getDb, isCloudBaseEnabled } from './cloudbase'
 import {
@@ -56,16 +55,15 @@ export async function loginOrRegister(username: string, password: string): Promi
   }
 
   const auth = getAuth()
-  const email = usernameToEmail(username)
 
-  let signInRes = await auth.signInWithPassword({ email, password })
+  let signInRes = await auth.signInWithPassword({ username, password })
   if (signInRes.error) {
-    const signUpRes = await auth.signUp({ email, password, username })
+    const signUpRes = await auth.signUp({ username, password })
     if (signUpRes.error) {
       throw new Error(getAuthErrorMessage(signUpRes.error, '注册失败，请稍后再试'))
     }
 
-    signInRes = await auth.signInWithPassword({ email, password })
+    signInRes = await auth.signInWithPassword({ username, password })
     if (signInRes.error) {
       throw new Error(getAuthErrorMessage(signInRes.error, '登录失败，请稍后再试'))
     }
