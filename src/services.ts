@@ -2,6 +2,7 @@ import {
   ALLOWED_USERNAMES,
   getDateKeyFromTimestamp,
   getTodayKey,
+  usernameToEmail,
 } from './constants'
 import { getAuth, getDb, isCloudBaseEnabled } from './cloudbase'
 import {
@@ -23,7 +24,14 @@ import type { GratitudeEntry, Post, User } from './types'
 type CloudBaseDoc = Record<string, unknown> & { _id?: string }
 
 function getAuthErrorMessage(error: { message?: string } | null | undefined, fallback: string) {
-  return error?.message ?? fallback
+  const message = error?.message ?? fallback
+  if (message.includes('email or phone')) {
+    return '登录失败，请稍后再试'
+  }
+  if (message.includes('Invalid login credentials') || message.includes('password')) {
+    return '密码不正确，请再试一次'
+  }
+  return message.includes('请') || /[\u4e00-\u9fff]/.test(message) ? message : fallback
 }
 
 async function resolveCurrentUser(): Promise<User | null> {
@@ -55,15 +63,16 @@ export async function loginOrRegister(username: string, password: string): Promi
   }
 
   const auth = getAuth()
+  const email = usernameToEmail(username)
 
-  let signInRes = await auth.signInWithPassword({ username, password })
+  let signInRes = await auth.signInWithPassword({ email, password })
   if (signInRes.error) {
-    const signUpRes = await auth.signUp({ username, password })
+    const signUpRes = await auth.signUp({ email, password, username })
     if (signUpRes.error) {
       throw new Error(getAuthErrorMessage(signUpRes.error, '注册失败，请稍后再试'))
     }
 
-    signInRes = await auth.signInWithPassword({ username, password })
+    signInRes = await auth.signInWithPassword({ email, password })
     if (signInRes.error) {
       throw new Error(getAuthErrorMessage(signInRes.error, '登录失败，请稍后再试'))
     }
